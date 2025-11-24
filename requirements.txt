@@ -1,0 +1,9 @@
+streamlit
+pandas
+scikit-learn
+matplotlib
+openmeteo-requests
+requests-cache
+retry-requests
+holidays
+joblib
