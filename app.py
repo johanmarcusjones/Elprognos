@@ -8,7 +8,7 @@ import holidays
 import plotly.graph_objects as go
 from datetime import datetime, timedelta
 
-# --- INSTÄLLNINGAR ---
+# --- 1. INSTÄLLNINGAR ---
 st.set_page_config(page_title="Elpris SE4", page_icon="⚡")
 
 LAT_SE = 55.605
@@ -18,11 +18,7 @@ LON_DE = 9.993
 VALUTAKURS = 11.60 
 ANTAL_DAGAR = 7
 
-# Gränser för färgläggning
-GRANS_BILLIGT = 60
-GRANS_DYRT = 100
-
-# --- DATAHÄMTNING ---
+# --- 2. HÄMTA VÄDER ---
 @st.cache_data
 def hamta_vader_data():
     cache_session = requests_cache.CachedSession('.cache', expire_after = 3600)
@@ -41,6 +37,7 @@ def hamta_vader_data():
     
     responses = openmeteo.weather_api(url, params=params)
 
+    # Malmö
     r1 = responses[0].Hourly()
     d1 = {
         "Tid": pd.date_range(
@@ -54,6 +51,7 @@ def hamta_vader_data():
     }
     df1 = pd.DataFrame(d1)
 
+    # Hamburg
     r2 = responses[1].Hourly()
     d2 = {
         "Tid": df1['Tid'],
@@ -67,67 +65,71 @@ def ladda_modell():
     except:
         return None
 
-# --- FUNKTION FÖR ATT RITA KALENDER (HEATMAP) ---
+# --- 3. RITA KALENDER (HEATMAP) ---
 def rita_kalender(df):
-    # Skapa etiketter
     df['Dag_Datum'] = df['Tid'].dt.date
     df['Dag_Etikett'] = df['Tid'].dt.strftime('%a %d/%m').map(
         lambda x: x.replace('Mon', 'Mån').replace('Tue', 'Tis').replace('Wed', 'Ons')
                    .replace('Thu', 'Tor').replace('Fri', 'Fre').replace('Sat', 'Lör').replace('Sun', 'Sön')
     )
     
-    # Pivotera data: Rader=Dagar, Kolumner=Timmar
+    df['Timme_Int'] = df['Tid'].dt.hour
     dagar_unika = sorted(df['Dag_Datum'].unique())
     
-    z_values = []      # Färgvärde (Pris)
-    text_values = []   # Text i rutan
-    y_labels = []      # Etiketter Y-axel
-    
-    # För att styra färgen exakt (Grön/Gul/Röd) skapar vi en egen färgskala
-    # Men Heatmap i Plotly funkar bäst med numeriska värden. 
-    # Vi använder priset direkt.
+    z_values = []      
+    text_values = []   
+    y_labels = []      
     
     for dag in dagar_unika:
         dag_data = df[df['Dag_Datum'] == dag]
-        # Ta bara med dagar som har hyfsat komplett data (minst 20h)
-        if len(dag_data) >= 20:
+        rad_z = [None] * 24
+        rad_text = [""] * 24
+        
+        for _, row in dag_data.iterrows():
+            t = row['Timme_Int']
+            if 0 <= t < 24:
+                pris = int(round(row['Pris_Sek']))
+                rad_z[t] = pris
+                rad_text[t] = str(pris)
+        
+        if any(v is not None for v in rad_z):
             y_labels.append(dag_data['Dag_Etikett'].iloc[0])
-            priser = dag_data['Pris_Sek'].round(0).astype(int)
-            z_values.append(priser.tolist())
-            text_values.append(priser.tolist()) # Siffran som syns
+            z_values.append(rad_z)
+            text_values.append(rad_text)
 
-    # Vänd ordning så "Idag" hamnar överst
+    # Vänd ordning
     z_values = z_values[::-1]
     text_values = text_values[::-1]
     y_labels = y_labels[::-1]
 
-    # Skräddarsydd färgskala
-    # Vi vill ha Grön upp till 60, Gul upp till 100, Röd över 100.
-    # Plotly colorscale är 0.0 till 1.0. Vi får mappa detta.
-    
+    if not z_values:
+        return None
+
+    # FÄRGSKALA: 0-60 (Grön), 60-100 (Gul), >100 (Röd)
     fig = go.Figure(data=go.Heatmap(
         z=z_values,
-        x=[f"{i:02}" for i in range(24)], # 00, 01...
+        x=[f"{i:02}" for i in range(24)],
         y=y_labels,
         text=text_values,
-        texttemplate="%{text}", # Visa priset
+        texttemplate="%{text}", 
         textfont={"size": 11, "color": "white"},
-        xgap=2, ygap=2, # Mellanrum mellan rutor
+        xgap=2, ygap=2,
         colorscale=[
-            [0.0, "#00cc96"], # Grön (Låg)
-            [0.4, "#00cc96"], # Grön upp till ca 40% av maxpriset (justerbart)
-            [0.40001, "#fecb52"], # Gul start
-            [0.7, "#fecb52"], # Gul slut
-            [0.70001, "#ef553b"], # Röd start
-            [1.0, "#ef553b"]  # Röd slut
+            [0.0, "#00cc96"], 
+            [0.4, "#00cc96"], 
+            [0.40001, "#fecb52"], 
+            [0.66, "#fecb52"], 
+            [0.66001, "#ef553b"], 
+            [1.0, "#ef553b"] 
         ],
-        zmin=0, zmax=150, # Sätter fast skala 0-150 öre
-        showscale=False # Dölj färgbalken på sidan
+        zmin=0, zmax=150, 
+        showscale=False,
+        hoverongaps=False
     ))
 
     fig.update_layout(
         title="7-dygnskalender",
-        height=len(y_labels) * 40 + 60, # Anpassa höjd
+        height=len(y_labels) * 40 + 60,
         margin=dict(l=0, r=0, t=40, b=0),
         xaxis=dict(side="top", showgrid=False, title=None, tickfont=dict(size=10)),
         yaxis=dict(showgrid=False, title=None),
@@ -135,14 +137,13 @@ def rita_kalender(df):
         plot_bgcolor='rgba(0,0,0,0)'
     )
     return fig
-
-# --- APP START ---
+# --- 4. HUVUDPROGRAM ---
 st.markdown("### ⚡ Elpris SE4")
 
 model = ladda_modell()
 
 if model is None:
-    st.error("⚠️ Ladda upp modellfilen!")
+    st.error("⚠️ Ladda upp modellfilen (min_el_modell.pkl)!")
 else:
     df = hamta_vader_data()
 
@@ -170,5 +171,32 @@ else:
 
     fig_line = go.Figure()
     fig_line.add_trace(go.Scatter(
-        x=df_trend['Tid'], y=df_trend['Pris_Sek'],
-        mode='lines', line=dict(color='#29b6f6',
+        x=df_trend['Tid'], 
+        y=df_trend['Pris_Sek'],
+        mode='lines', 
+        line=dict(color='#29b6f6', width=2, shape='hv'),
+        fill='tozeroy', 
+        fillcolor='rgba(41, 182, 246, 0.1)'
+    ))
+    fig_line.update_layout(
+        template='plotly_dark', height=200, margin=dict(l=0, r=0, t=10, b=0),
+        showlegend=False, yaxis=dict(showgrid=False, side='right'),
+        xaxis=dict(showgrid=False, tickformat='%H:%M'),
+        paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)',
+        hovermode="x unified"
+    )
+    st.plotly_chart(fig_line, use_container_width=True, config={'displayModeBar': False})
+
+    # 2. KALENDER (NEDERST)
+    st.write("---")
+    
+    # Filter: Visa Idag + 6 dagar framåt
+    dag_start = nu.normalize()
+    dag_slut = dag_start + pd.Timedelta(days=ANTAL_DAGAR)
+    df_cal = df[(df['Tid'] >= dag_start) & (df['Tid'] < dag_slut)].copy()
+    
+    fig_cal = rita_kalender(df_cal)
+    if fig_cal:
+        st.plotly_chart(fig_cal, use_container_width=True, config={'displayModeBar': False})
+    else:
+        st.info("Hämtar data för kalendern...")
