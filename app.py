@@ -16,11 +16,11 @@ LON_SE = 13.003
 LAT_DE = 53.551
 LON_DE = 9.993
 VALUTAKURS = 11.60 
-ANTAL_DAGAR = 3
+ANTAL_DAGAR = 7
 
-# Färggränser för staplarna
-GRANS_LIG = 40   # Under detta = Grönt
-GRANS_HOG = 100  # Över detta = Rött (Mellan = Gult)
+# Gränser för färgläggning
+GRANS_BILLIGT = 60
+GRANS_DYRT = 100
 
 # --- DATAHÄMTNING ---
 @st.cache_data
@@ -67,36 +67,70 @@ def ladda_modell():
     except:
         return None
 
-# --- FUNKTION FÖR ATT RITA STAPELGRAFEN ---
-def rita_staplar(df_dag):
-    # Skapa färger baserat på pris
-    colors = []
-    for pris in df_dag['Pris_Sek']:
-        if pris < GRANS_LIG:
-            colors.append('#00cc96') # Grön
-        elif pris > GRANS_HOG:
-            colors.append('#ef553b') # Röd
-        else:
-            colors.append('#fecb52') # Gul/Orange
+# --- FUNKTION FÖR ATT RITA KALENDER (HEATMAP) ---
+def rita_kalender(df):
+    # Skapa etiketter
+    df['Dag_Datum'] = df['Tid'].dt.date
+    df['Dag_Etikett'] = df['Tid'].dt.strftime('%a %d/%m').map(
+        lambda x: x.replace('Mon', 'Mån').replace('Tue', 'Tis').replace('Wed', 'Ons')
+                   .replace('Thu', 'Tor').replace('Fri', 'Fre').replace('Sat', 'Lör').replace('Sun', 'Sön')
+    )
+    
+    # Pivotera data: Rader=Dagar, Kolumner=Timmar
+    dagar_unika = sorted(df['Dag_Datum'].unique())
+    
+    z_values = []      # Färgvärde (Pris)
+    text_values = []   # Text i rutan
+    y_labels = []      # Etiketter Y-axel
+    
+    # För att styra färgen exakt (Grön/Gul/Röd) skapar vi en egen färgskala
+    # Men Heatmap i Plotly funkar bäst med numeriska värden. 
+    # Vi använder priset direkt.
+    
+    for dag in dagar_unika:
+        dag_data = df[df['Dag_Datum'] == dag]
+        # Ta bara med dagar som har hyfsat komplett data (minst 20h)
+        if len(dag_data) >= 20:
+            y_labels.append(dag_data['Dag_Etikett'].iloc[0])
+            priser = dag_data['Pris_Sek'].round(0).astype(int)
+            z_values.append(priser.tolist())
+            text_values.append(priser.tolist()) # Siffran som syns
 
-    # Skapa stapeldiagram
-    fig = go.Figure(go.Bar(
-        x=df_dag['Pris_Sek'],
-        y=df_dag['Tid_Timme'], # Visar "00-01", "01-02"
-        orientation='h', # Horisontell
-        marker_color=colors,
-        text=df_dag['Pris_Sek'].round(0).astype(int).astype(str) + " öre", # Text i stapeln
-        textposition='auto',
-        hoverinfo='y+x'
+    # Vänd ordning så "Idag" hamnar överst
+    z_values = z_values[::-1]
+    text_values = text_values[::-1]
+    y_labels = y_labels[::-1]
+
+    # Skräddarsydd färgskala
+    # Vi vill ha Grön upp till 60, Gul upp till 100, Röd över 100.
+    # Plotly colorscale är 0.0 till 1.0. Vi får mappa detta.
+    
+    fig = go.Figure(data=go.Heatmap(
+        z=z_values,
+        x=[f"{i:02}" for i in range(24)], # 00, 01...
+        y=y_labels,
+        text=text_values,
+        texttemplate="%{text}", # Visa priset
+        textfont={"size": 11, "color": "white"},
+        xgap=2, ygap=2, # Mellanrum mellan rutor
+        colorscale=[
+            [0.0, "#00cc96"], # Grön (Låg)
+            [0.4, "#00cc96"], # Grön upp till ca 40% av maxpriset (justerbart)
+            [0.40001, "#fecb52"], # Gul start
+            [0.7, "#fecb52"], # Gul slut
+            [0.70001, "#ef553b"], # Röd start
+            [1.0, "#ef553b"]  # Röd slut
+        ],
+        zmin=0, zmax=150, # Sätter fast skala 0-150 öre
+        showscale=False # Dölj färgbalken på sidan
     ))
 
     fig.update_layout(
-        template='plotly_dark',
-        height=len(df_dag) * 35, # Dynamisk höjd
-        margin=dict(l=0, r=0, t=0, b=0),
-        barmode='stack',
-        yaxis=dict(autorange="reversed"), # 00:00 högst upp
-        xaxis=dict(visible=False), # Dölj x-axeln (siffrorna står ju i stapeln)
+        title="7-dygnskalender",
+        height=len(y_labels) * 40 + 60, # Anpassa höjd
+        margin=dict(l=0, r=0, t=40, b=0),
+        xaxis=dict(side="top", showgrid=False, title=None, tickfont=dict(size=10)),
+        yaxis=dict(showgrid=False, title=None),
         paper_bgcolor='rgba(0,0,0,0)',
         plot_bgcolor='rgba(0,0,0,0)'
     )
@@ -122,66 +156,19 @@ else:
     pris_eur = model.predict(X)
     df['Pris_Sek'] = ((pris_eur * VALUTAKURS) / 10) * 1.25
 
-    # Filter för Översikten (48h)
+    # 1. MINIMALISTISK TREND (ÖVERST)
     nu = pd.Timestamp.now(tz='Europe/Stockholm')
     nu_timme = nu.floor('h')
-    slut = nu + pd.Timedelta(hours=48)
-    df_plot = df[(df['Tid'] >= nu_timme) & (df['Tid'] <= slut)].copy()
+    slut_trend = nu + pd.Timedelta(hours=48)
+    df_trend = df[(df['Tid'] >= nu_timme) & (df['Tid'] <= slut_trend)].copy()
 
-    aktuellt_pris = df_plot.iloc[0]['Pris_Sek'] if len(df_plot) > 0 else 0
+    aktuellt_pris = df_trend.iloc[0]['Pris_Sek'] if len(df_trend) > 0 else 0
     
-    # 1. ÖVERST: Minimalistisk KPI & Linjegraf
     col1, col2 = st.columns([1, 2])
     with col1:
         st.metric(label="Just nu", value=f"{aktuellt_pris:.0f} öre")
-    
+
     fig_line = go.Figure()
     fig_line.add_trace(go.Scatter(
-        x=df_plot['Tid'], y=df_plot['Pris_Sek'],
-        mode='lines', line=dict(color='#29b6f6', width=2, shape='hv'),
-        fill='tozeroy', fillcolor='rgba(41, 182, 246, 0.1)'
-    ))
-    fig_line.update_layout(
-        template='plotly_dark', height=250, margin=dict(l=0, r=0, t=10, b=0),
-        showlegend=False, 
-        yaxis=dict(showgrid=False, side='right'),
-        xaxis=dict(showgrid=False, tickformat='%H:%M'),
-        paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)',
-        hovermode="x unified"
-    )
-    st.plotly_chart(fig_line, use_container_width=True, config={'displayModeBar': False})
-
-    # ---------------------------------------------------------
-    # 2. LÄNGRE NER: Stapelgrafen (Lik din bild)
-    # ---------------------------------------------------------
-    st.write("---") # En linje för att separera sektionerna
-    st.markdown("#### Timpriser")
-
-    # Förbered data för staplarna (Idag och Imorgon)
-    # Skapa en snygg tidssträng "13-14"
-    df['Tid_Timme'] = df['Tid'].dt.strftime('%H') + "-" + (df['Tid'] + pd.Timedelta(hours=1)).dt.strftime('%H')
-    
-    today = nu.date()
-    tomorrow = today + pd.Timedelta(days=1)
-    
-    df_today = df[df['Tid'].dt.date == today].copy()
-    df_tomorrow = df[df['Tid'].dt.date == tomorrow].copy()
-
-    # Använd flikar för att spara plats
-    tab1, tab2 = st.tabs(["Idag", "Imorgon"])
-
-    with tab1:
-        st.caption(f"Priser för {today}")
-        if not df_today.empty:
-            fig_today = rita_staplar(df_today)
-            st.plotly_chart(fig_today, use_container_width=True, config={'displayModeBar': False})
-        else:
-            st.info("Ingen data för idag kvar.")
-
-    with tab2:
-        st.caption(f"Priser för {tomorrow}")
-        if not df_tomorrow.empty:
-            fig_tomorrow = rita_staplar(df_tomorrow)
-            st.plotly_chart(fig_tomorrow, use_container_width=True, config={'displayModeBar': False})
-        else:
-            st.info("Morgondagens priser kommer snart...")
+        x=df_trend['Tid'], y=df_trend['Pris_Sek'],
+        mode='lines', line=dict(color='#29b6f6',
